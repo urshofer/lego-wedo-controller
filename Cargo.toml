@@ -8,6 +8,8 @@ description = "Controller for the LEGO WeDo 1.0 USB hub (9581 / 45303)"
 hidapi = { version = "2.4", features = ["windows-native"] }
 # OpenGL (glow) instead of wgpu: runs on old laptops without DX12/Vulkan.
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+rusb = { version = "0.9.4", features = ["vendored"] }
+rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
 
 [profile.release]
 strip = true

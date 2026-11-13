@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 use wedo::{Attached, Port, Tilt, WeDo};
 
 mod gui;
+mod joyconfig;
+mod sound;
 
 const USAGE: &str = "\
 Usage:
   wedo                             open the graphical controller
-  wedo web [port]                  serve the browser (WebHID) controller, default port 8080
   wedo watch                       print sensor readings (Ctrl-C to quit)
   wedo motor <a|b> <speed> [secs]  run a motor, speed -100..100 (default 2 s)
   wedo stop                        stop both motors
@@ -33,11 +34,6 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
-    }
-    match args.as_slice() {
-        ["web"] => return serve_web(8080),
-        ["web", port] => return port.parse().map_or_else(|_| usage(), serve_web),
-        _ => {}
     }
     if !matches!(
         args.as_slice(),
@@ -123,18 +119,27 @@ fn run_motor(hub: &mut WeDo, port: Port, speed: i32, secs: f64) -> Result<(), hi
 fn demo(hub: &mut WeDo) -> Result<(), hidapi::HidError> {
     println!("Demo running for 60 s. Tilt forward/back or wave a hand at the distance sensor.");
     let start = Instant::now();
+    // The first reports can show empty ports, and a motor's ID flickers, so
+    // keep the last port a motor was seen on instead of giving up.
+    let mut motor_port: Option<Port> = None;
+    let mut hinted = false;
     while start.elapsed() < Duration::from_secs(60) {
         let Some(r) = hub.read(Duration::from_millis(200))? else {
             continue;
         };
-        let (motor_port, sensor) = match (r.a, r.b) {
-            (Attached::Motor, s) => (Port::A, s),
-            (s, Attached::Motor) => (Port::B, s),
-            _ => {
-                eprintln!("Plug a motor into one port and a sensor into the other.");
-                return Ok(());
+        match (r.a, r.b) {
+            (Attached::Motor, _) => motor_port = Some(Port::A),
+            (_, Attached::Motor) => motor_port = Some(Port::B),
+            _ => {}
+        }
+        let Some(motor_port) = motor_port else {
+            if !hinted && start.elapsed() > Duration::from_secs(2) {
+                eprintln!("Waiting for a motor: plug one into a port and a sensor into the other.");
+                hinted = true;
             }
+            continue;
         };
+        let sensor = if motor_port == Port::A { r.b } else { r.a };
         let speed = match sensor {
             Attached::Tilt(Tilt::Forward) => 80,
             Attached::Tilt(Tilt::Back) => -80,
@@ -145,46 +150,6 @@ fn demo(hub: &mut WeDo) -> Result<(), hidapi::HidError> {
         hub.set_motor(motor_port, speed)?;
     }
     hub.stop()
-}
-
-const WEB_PAGE: &str = include_str!("../web/index.html");
-
-/// Serve the WebHID page. WebHID needs a secure context; http://localhost counts.
-fn serve_web(port: u16) -> ExitCode {
-    use std::io::{Read, Write};
-    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("Couldn't listen on port {port}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let url = format!("http://localhost:{port}/");
-    println!("WeDo web controller at {url}  (Chrome/Edge/Opera; Ctrl-C to quit)");
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(&url).spawn();
-    #[cfg(windows)]
-    let _ = std::process::Command::new("cmd").args(["/C", "start", "", &url]).spawn();
-
-    for stream in listener.incoming().flatten() {
-        let mut stream = stream;
-        let mut buf = [0u8; 2048];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        let path = std::str::from_utf8(&buf[..n])
-            .ok()
-            .and_then(|r| r.split_whitespace().nth(1))
-            .unwrap_or("/");
-        let (status, ctype, body) = match path {
-            "/" | "/index.html" => ("200 OK", "text/html; charset=utf-8", WEB_PAGE),
-            _ => ("404 Not Found", "text/plain", "not found"),
-        };
-        let _ = write!(
-            stream,
-            "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-    }
-    ExitCode::SUCCESS
 }
 
 /// GUI-subsystem programs have no console; borrow the one we were started
