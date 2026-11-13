@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeDo Controller</title>
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --card: #ffffff;
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --line: #e2e0da;
+    --accent: #e8a50c;
+    --accent-soft: #fdf3dc;
+    --green: #2ea043;
+    --red: #cf463c;
+    --track: #ecebe7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161618;
+      --card: #202023;
+      --text: #f2f2f4;
+      --muted: #9a9aa0;
+      --line: #333338;
+      --accent: #f0b41e;
+      --accent-soft: #3a2f14;
+      --track: #2c2c31;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 40px; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 24px; margin: 0; flex: 1; letter-spacing: -0.01em; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: 999px; font-weight: 600; font-size: 14px;
+    border: 1px solid currentColor;
+  }
+  .badge.on { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
+  .badge.off { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
+  button {
+    font: inherit; cursor: pointer; border-radius: 8px; padding: 6px 12px;
+    border: 1px solid var(--line); background: var(--card); color: var(--text);
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #1d1d1f; font-weight: 600; }
+  button.stop { background: var(--red); border-color: var(--red); color: #fff; font-weight: 600; padding: 8px 18px; }
+  .notice {
+    background: var(--accent-soft); border-radius: 10px; padding: 10px 14px; margin-bottom: 16px;
+  }
+  .ports { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px; display: flex; flex-direction: column; gap: 12px; min-height: 300px;
+  }
+  .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .card-head h2 { margin: 0; font-size: 18px; }
+  .device { color: var(--accent); font-weight: 600; }
+  .device.fault { color: var(--red); }
+  .label { color: var(--muted); font-size: 13px; }
+  .bar { height: 22px; background: var(--track); border-radius: 6px; overflow: hidden; position: relative; }
+  .bar > div { height: 100%; background: var(--accent); transition: width 80ms linear; }
+  .bar > span { position: absolute; inset: 0; display: grid; place-items: center; font-size: 13px; font-weight: 600; }
+  .compass { display: grid; grid-template-columns: repeat(3, 40px); gap: 4px; }
+  .compass span { height: 36px; display: grid; place-items: center; font-size: 22px; color: var(--line); }
+  .compass span.on { color: var(--accent); }
+  .slider-row { display: flex; align-items: center; gap: 10px; }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  .value { min-width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
+  .presets { display: flex; gap: 6px; flex-wrap: wrap; }
+  .raw { margin-top: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  footer { margin-top: 20px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>WeDo Controller</h1>
+    <span id="badge" class="badge off">✘ Not connected</span>
+    <button id="connect" class="primary">Connect hub…</button>
+  </header>
+
+  <div id="unsupported" class="notice hidden">
+    This browser has no WebHID. Open the page in Chrome, Edge or Opera on a desktop.
+  </div>
+
+  <section class="ports" id="ports"></section>
+
+  <footer>
+    <button id="stop" class="stop" disabled>⏹ Stop all</button>
+    <span id="hint" class="label">Plug in the WeDo hub and press “Connect hub…”.</span>
+  </footer>
+</main>
+
+<template id="card-tpl">
+  <article class="card">
+    <div class="card-head"><h2></h2><span class="device">—</span></div>
+    <div class="sensor"></div>
+    <div class="control">
+      <div class="label ctl-label">Motor speed</div>
+      <div class="slider-row">
+        <input type="range" min="-100" max="100" value="0" disabled>
+        <span class="value">0 %</span>
+      </div>
+      <div class="presets"></div>
+    </div>
+    <div class="raw"></div>
+  </article>
+</template>
+
+<script>
+// Protocol and device table mirror src/lib.rs (ID ranges from the ev3dev driver).
+const VENDOR_ID = 0x0694, PRODUCT_ID = 0x0003, DEBOUNCE = 8;
+// While a port is driven its ID line follows the output, so the device type is
+// frozen while driving and for SETTLE_MS after the output returns to 0.
+const SETTLE_MS = 500;
+
+const KINDS = [
+  [9, "Short", "Short circuit"], [27, "Bend", "Bend sensor"], [47, "Tilt", "Tilt sensor"],
+  [67, "Future", "Future device"], [87, "Raw", "Raw input"], [100, "Touch", "Touch sensor"],
+  [109, "Servo", "Servo motor"], [131, "Sound", "Sound sensor"], [152, "Temperature", "Temperature sensor"],
+  [169, "Light", "Light sensor"], [190, "Motion", "Motion sensor"], [211, "LightBrick", "Light brick"],
+  [224, "Reserved22", "Reserved (22)"], [233, "Empty", "Empty"], [246, "Motor", "Motor"],
+  [255, "Short", "Short circuit"],
+];
+const kindFromId = id => KINDS.find(([max]) => id <= max)[1];
+const kindName = k => KINDS.find(([, key]) => key === k)[2];
+
+function tilt(v) {
+  if (v <= 48) return "Forward";
+  if (v <= 99) return "Left";
+  if (v <= 153) return "Level";
+  if (v <= 204) return "Back";
+  return "Right";
+}
+const proximity = raw => Math.round((Math.min(Math.max(raw, 71), 219) - 71) * 100 / 148);
+
+const MODES = {
+  motor: { label: "Motor speed", min: -100, max: 100, presets: [["◀ −100", -100], ["■ 0", 0], ["100 ▶", 100]],
+           toByte: s => s === 0 ? 0 : s > 0 ? 27 + s : s - 27 },
+  servo: { label: "Servo position", min: -100, max: 100, presets: [["◀ left", -100], ["● centre", 0], ["right ▶", 100]],
+           toByte: s => Math.trunc(s * 127 / 100) },
+  light: { label: "Brightness", min: 0, max: 100, presets: [["off", 0], ["half", 50], ["full", 100]],
+           toByte: s => Math.trunc(s * 127 / 100) },
+};
+const modeForKind = k => k === "Servo" ? "servo" : k === "LightBrick" ? "light" : "motor";
+
+let device = null;
+const out = [0, 0];
+
+const ports = ["A", "B"].map((name, i) => {
+  const el = document.getElementById("card-tpl").content.firstElementChild.cloneNode(true);
+  el.querySelector("h2").textContent = `Port ${name}`;
+  document.getElementById("ports").append(el);
+  const port = {
+    el, i, mode: null, kind: null, pending: null, count: 0, sensorKey: null, settleUntil: 0,
+    device: el.querySelector(".device"),
+    sensor: el.querySelector(".sensor"),
+    slider: el.querySelector("input"),
+    value: el.querySelector(".value"),
+    ctlLabel: el.querySelector(".ctl-label"),
+    presets: el.querySelector(".presets"),
+    raw: el.querySelector(".raw"),
+  };
+  port.slider.addEventListener("input", () => setOutput(port, +port.slider.value));
+  setMode(port, "motor");
+  return port;
+});
+
+function setMode(port, mode) {
+  if (port.mode === mode) return;
+  port.mode = mode;
+  const m = MODES[mode];
+  port.ctlLabel.textContent = m.label;
+  port.slider.min = m.min;
+  port.slider.max = m.max;
+  port.presets.replaceChildren(...m.presets.map(([text, v]) => {
+    const b = document.createElement("button");
+    b.textContent = text;
+    b.disabled = !device;
+    b.onclick = () => setOutput(port, v);
+    return b;
+  }));
+  setOutput(port, 0);
+}
+
+function setOutput(port, v) {
+  port.slider.value = v;
+  port.value.textContent = `${v} %`;
+  const b = MODES[port.mode].toByte(v);
+  if (out[port.i] !== 0 && b === 0) port.settleUntil = performance.now() + SETTLE_MS;
+  out[port.i] = b;
+  send();
+}
+
+// Coalesce slider spam: at most one report in flight, always the latest values.
+let sending = false, dirty = false;
+async function send() {
+  if (!device) return;
+  if (sending) { dirty = true; return; }
+  sending = true;
+  try {
+    do {
+      dirty = false;
+      await device.sendReport(0, new Uint8Array([0x40, out[0] & 0xff, out[1] & 0xff, 0, 0, 0, 0, 0]));
+    } while (dirty && device);
+  } catch (e) {
+    console.warn("sendReport failed", e);
+  } finally {
+    sending = false;
+  }
+}
+
+function debounce(port, k) {
+  if (port.kind === "Motor" && k === "Short") return port.kind; // running motor pulls the ID low
+  if (port.kind === null) {
+    // Startup reports are noisy: wait for agreement before committing.
+    if (port.pending === k) port.count++; else { port.pending = k; port.count = 1; }
+    if (port.count >= DEBOUNCE) { port.kind = k; port.pending = null; }
+    return port.kind ?? "Empty";
+  }
+  if (port.kind === k) { port.pending = null; return k; }
+  if (port.pending === k) {
+    if (++port.count >= DEBOUNCE) { port.kind = k; port.pending = null; }
+  } else {
+    port.pending = k; port.count = 1;
+  }
+  return port.kind;
+}
+
+function render(port, id, value) {
+  const frozen = port.kind !== null && (out[port.i] !== 0 || performance.now() < port.settleUntil);
+  const kind = frozen ? port.kind : debounce(port, kindFromId(id));
+  port.device.textContent = kindName(kind);
+  port.device.classList.toggle("fault", kind === "Short");
+  setMode(port, modeForKind(kind));
+  // Sensors can't be driven; only show the output control for outputs or an empty port.
+  port.el.querySelector(".control").classList.toggle("hidden", !["Motor", "Servo", "LightBrick", "Empty"].includes(kind));
+  port.raw.textContent = `raw id ${id} · value ${value}`;
+
+  if (kind === "Tilt") {
+    const t = tilt(value);
+    if (port.sensorKey !== "tilt") {
+      port.sensorKey = "tilt";
+      port.sensor.innerHTML = `<div class="label">Tilt: <b class="tilt-name"></b></div>
+        <div class="compass"><span></span><span data-t="Forward">▲</span><span></span>
+        <span data-t="Left">◀</span><span data-t="Level">●</span><span data-t="Right">▶</span>
+        <span></span><span data-t="Back">▼</span><span></span></div>`;
+    }
+    port.sensor.querySelector(".tilt-name").textContent = t;
+    port.sensor.querySelectorAll("[data-t]").forEach(s => s.classList.toggle("on", s.dataset.t === t));
+  } else if (kind === "Motion" || ["Bend", "Future", "Raw", "Touch", "Sound", "Temperature", "Light", "Reserved22"].includes(kind)) {
+    const isMotion = kind === "Motion";
+    const frac = isMotion ? proximity(value) / 100 : value / 255;
+    const text = isMotion ? `${proximity(value)} %  (raw ${value})` : `${value} / 255`;
+    if (port.sensorKey !== "bar") {
+      port.sensorKey = "bar";
+      port.sensor.innerHTML = `<div class="label bar-label"></div><div class="bar"><div></div><span></span></div>`;
+    }
+    port.sensor.querySelector(".bar-label").textContent = isMotion ? "Proximity (100 % = close)" : "Value";
+    port.sensor.querySelector(".bar > div").style.width = `${frac * 100}%`;
+    port.sensor.querySelector(".bar > span").textContent = text;
+  } else if (kind === "Short") {
+    port.sensorKey = "short";
+    port.sensor.innerHTML = `<div class="label" style="color:var(--red)">Check the cable: the port reads as shorted.</div>`;
+  } else if (port.sensorKey !== null) {
+    port.sensorKey = null;
+    port.sensor.replaceChildren();
+  }
+}
+
+function onReport(e) {
+  const d = e.data;
+  if (d.byteLength < 6) return;
+  render(ports[0], d.getUint8(3), d.getUint8(2));
+  render(ports[1], d.getUint8(5), d.getUint8(4));
+}
+
+function setConnected(on) {
+  const badge = document.getElementById("badge");
+  badge.className = `badge ${on ? "on" : "off"}`;
+  badge.textContent = on ? "✔ Connected" : "✘ Not connected";
+  document.getElementById("connect").classList.toggle("hidden", on);
+  document.getElementById("stop").disabled = !on;
+  document.getElementById("hint").classList.toggle("hidden", on);
+  for (const p of ports) {
+    p.slider.disabled = !on;
+    p.presets.querySelectorAll("button").forEach(b => (b.disabled = !on));
+    if (!on) {
+      p.kind = p.pending = p.sensorKey = null;
+      p.device.textContent = "—";
+      p.device.classList.remove("fault");
+      p.sensor.replaceChildren();
+      p.raw.textContent = "";
+      p.el.querySelector(".control").classList.remove("hidden");
+      setMode(p, "motor");
+      setOutput(p, 0);
+    }
+  }
+}
+
+async function open(dev) {
+  if (device) return;
+  try {
+    if (!dev.opened) await dev.open();
+  } catch (e) {
+    console.warn("open failed", e);
+    document.getElementById("hint").textContent = `Couldn't open the hub: ${e.message}. Is the native app holding it?`;
+    return;
+  }
+  device = dev;
+  dev.addEventListener("inputreport", onReport);
+  out[0] = out[1] = 0;
+  setConnected(true);
+  send();
+}
+
+async function stopAll() {
+  for (const p of ports) setOutput(p, 0);
+}
+
+if (!("hid" in navigator)) {
+  document.getElementById("unsupported").classList.remove("hidden");
+  document.getElementById("connect").disabled = true;
+} else {
+  document.getElementById("connect").onclick = async () => {
+    const [dev] = await navigator.hid.requestDevice({ filters: [{ vendorId: VENDOR_ID, productId: PRODUCT_ID }] });
+    if (dev) open(dev);
+  };
+  document.getElementById("stop").onclick = stopAll;
+
+  // Hubs this page was already granted reconnect without a click.
+  const isHub = d => d.vendorId === VENDOR_ID && d.productId === PRODUCT_ID;
+  navigator.hid.getDevices().then(ds => { const d = ds.find(isHub); if (d) open(d); });
+  navigator.hid.addEventListener("connect", e => { if (isHub(e.device)) open(e.device); });
+  navigator.hid.addEventListener("disconnect", e => {
+    if (e.device === device) { device = null; setConnected(false); }
+  });
+  // Best effort: don't leave motors running when the tab closes.
+  window.addEventListener("pagehide", () => {
+    if (device) device.sendReport(0, new Uint8Array([0x40, 0, 0, 0, 0, 0, 0, 0]));
+  });
+}
+setConnected(false);
+</script>
+</body>
+</html>
